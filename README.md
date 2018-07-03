@@ -4,13 +4,15 @@ Downloads materials from the CQF portal.
 
 ## Requirements
 
-This script was written for Python 3.x. This script depends on the requests and BeautifulSoup libraries.
+  * Python 3.6 or greater
+  * requests
+  * BeautifulSoup
 
 ## Usage
 
 Example usage:
 ```
-with CqfDownloader(outdir) as cqf:
+with CqfDownloader() as cqf:
     cqf.login(username, password)
     cqf.download_study_materials(num_workers=8)
 ```

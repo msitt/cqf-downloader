@@ -15,10 +15,10 @@ from bs4 import BeautifulSoup
 
 class CqfDownloader:
     """Class to download CQF materials."""
-    def __init__(self, outdir):
-        self._base_output_dir = outdir
+    def __init__(self):
         self._session = requests.Session()
         self.verbose = False
+        self.base_output_dir = ''
 
         self.login_url = 'https://erp.fitchlearning.com/erp_live/2/index.php/PortalEx/6/0/login/'
         self.study_url = 'https://erp.fitchlearning.com/erp_live/2/index.php/PortalEx/6/0/page/25776/show/'
@@ -283,7 +283,7 @@ class CqfDownloader:
                 self.referrer = referrer
                 self.failure_count = 0
 
-            def increment_failure_count(self, ):
+            def increment_failure_count(self):
                 """Increment failure count."""
                 self.failure_count += 1
 
@@ -293,7 +293,8 @@ def main():
     username = config.SETTINGS['username']
     password = config.SETTINGS['password']
     outdir = config.SETTINGS['outdir']
-    with CqfDownloader(outdir) as cqf:
+    with CqfDownloader() as cqf:
+        cqf.base_output_dir = outdir
         cqf.login(username, password)
         cqf.download_study_materials(num_workers=8)
 
