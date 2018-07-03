@@ -229,8 +229,11 @@ class CqfDownloader:
                 self._download_queue.task_done()
 
         def _do_download_item(self, directory, filename, url, referrer):
-            full_path = os.path.join(directory, filename)
-            if self.overwrite or not os.path.isfile(full_path):
+            path = os.path.join(directory, filename)
+            result = self._session.head(url, headers={'referer': referrer})
+            last_mod = datetime(*eut.parsedate(result.headers['Last-Modified'])[:6])
+            unix_time = (last_mod - datetime.utcfromtimestamp(0)).total_seconds()
+            if self.overwrite or not os.path.isfile(path) or os.path.getmtime(path) < unix_time:
                 if self.verbose:
                     print(f"Downloading {filename}.")
                 self._make_dir(directory)
@@ -246,16 +249,14 @@ class CqfDownloader:
                 if stopped_early:
                     self._remove_if_exists(f.name)
                     return
-                os.rename(f.name, full_path)
-                last_mod = datetime(*eut.parsedate(result.headers['Last-Modified'])[:6])
-                self._change_file_time(full_path, last_mod)
+                os.replace(f.name, path)
+                self._change_file_time(path, unix_time)
             else:
                 if self.verbose:
                     print(f"Skipping {filename} because it already exists.")
 
         @staticmethod
-        def _change_file_time(filename, date):
-            unix_time = (date - datetime.utcfromtimestamp(0)).total_seconds()
+        def _change_file_time(filename, unix_time):
             os.utime(filename, (unix_time, unix_time))
 
         @staticmethod
