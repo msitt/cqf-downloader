@@ -17,6 +17,11 @@ class CqfDownloader:
     """Class to download CQF materials."""
     def __init__(self):
         self._session = requests.Session()
+        custom_header = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:60.0) Gecko/20100101 Firefox/60.0',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        }
+        self._session.headers.update(custom_header)
         self.verbose = False
         self.base_output_dir = ''
 
