@@ -2,10 +2,11 @@ import email.utils as eut
 import errno
 import os
 import queue
-import shutil
+import re
 import tempfile
 import threading
 import time
+import traceback
 import urllib.parse
 from datetime import datetime
 
@@ -28,6 +29,18 @@ class CqfDownloader:
         self.login_url = 'https://erp.fitchlearning.com/erp_live/2/index.php/PortalEx/6/0/login/'
         self.study_url = 'https://erp.fitchlearning.com/erp_live/2/index.php/PortalEx/6/0/page/25776/show/'
 
+        self._IGNORED_7CITY_TYPES = set(['all', 'breeze', 'webex'])
+        self._EXCLUDE_LIST = set([
+            'http://en.literateprograms.org/High_Frequency_Finance'
+        ])
+
+        self._regex_7city_html_video = re.compile(r'^https?:\/\/.*(media\.fitchlearning\.com|fitchmediabucket|7citymedia).*\/CQF\/.*\.html(\?c=\d{10})?$', re.IGNORECASE)
+        self._regex_ssrn = re.compile(r'^http:\/\/ssrn.com\/abstract=(\d+)$')
+        self._regex_html = re.compile(r'^https?:\/\/.*\.html(\?.*)?$', re.IGNORECASE)
+        self._regex_webex = re.compile(r'^https?:(\/\/\w*\.)?webex\.com\/.*\/playback\.php', re.IGNORECASE)
+        self._regex_whitelist = re.compile(r'^https?:\/\/.*\.(mp4|avi|wmv|mov|flv|mp3|pdf|xls|xlsx|doc|docx|ppt|pptx|txt|zip|rar)(\?c=\d{10})?$', re.IGNORECASE)
+        self._regex_mms = re.compile(r'^mms?:\/\/.*$', re.IGNORECASE)
+
     def __enter__(self):
         return self
 
@@ -46,7 +59,7 @@ class CqfDownloader:
             download_manager = self._DownloadManager(self._session, num_workers)
             download_manager.verbose = self.verbose
 
-            result = self._session.get(self.study_url)
+            result = self._get_with_retry(3, self.study_url)
             soup = BeautifulSoup(result.text, 'html.parser')
             nav = soup.find('div', id='portal-nav-secondary')
             self._download_study_materials_helper(download_manager, ['Lectures'], nav)
@@ -66,6 +79,13 @@ class CqfDownloader:
                     download_manager.stop()
                     print("Waiting for threads to clean up.")
                     download_manager.join_on_workers_blocking()
+        except:
+            print(f"Got unexpected exception: {traceback.format_exc()}")
+            if download_manager:
+                print(f"Stopping with {download_manager.get_queue_size()} items remaining to be downloaded.")
+                download_manager.stop()
+                print("Waiting for threads to clean up.")
+                download_manager.join_on_workers_blocking()
 
     def _download_study_materials_helper(self, download_manager, path, node):
         ul = node.find('ul', class_='submenu-list', recursive=False)
@@ -85,22 +105,29 @@ class CqfDownloader:
 
     def _process_leaf(self, download_manager, url, path):
         print(f"Processing {'/'.join(path)}.")
-        result = self._session.get(url)
+        result = self._get_with_retry(3, url)
         soup = BeautifulSoup(result.text, 'html.parser')
         # Video
-        div = soup.find('div', id='content-tab-video')
-        if div:
-            new_path = path + ['Video']
-            self._download_videos(download_manager, url, new_path, div)
+        tag = soup.find('div', id='content-tab-video')
+        if tag:
+            self._download_videos(download_manager, url, path, tag)
 
         # Classnotes
-        div = soup.find('div', id='content-tab-classnotes')
-        if div:
-            new_path = path + ['Classnotes']
-            self._download_classnotes(download_manager, url, new_path, div)
+        tag = soup.find('div', id='content-tab-classnotes')
+        if tag:
+            self._download_classnotes(download_manager, url, path, tag)
+
+        # Additional Media Table
+        tag = soup.find('table', class_='coloured-table')
+        if tag:
+            if path[-1] == 'Alumni Lectures':
+                self._process_alumni_lectures(download_manager, url, path, tag)
+            else:
+                self._process_extra_media(download_manager, url, path, tag)
 
     def _download_videos(self, download_manager, url, path, div):
-        directory = os.path.join(self._base_output_dir, *path)
+        path = path + ['Video']
+        directory = os.path.join(self.base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in path])
         div = div.find('div', id='mediarecordingarea', recursive=False)
         for recording_entry in div.find_all('div', class_='recording-entry', recursive=False):
             # Skip LB (Low Bandwidth) versions
@@ -124,22 +151,166 @@ class CqfDownloader:
             json_result = result.json()
             soup = BeautifulSoup(json_result['html'], 'html.parser')
             video_url = soup.source.get('src')
-            self._download_item(download_manager, directory, video_url, url)
+            self._download_item(download_manager, directory, video_url, referrer=url)
 
     def _download_classnotes(self, download_manager, url, path, div):
-        directory = os.path.join(self._base_output_dir, *path)
+        path = path + ['Classnotes']
+        directory = os.path.join(self.base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in path])
         div = div.find('div', id='classnotes-area', recursive=False)
         for classnotes_link in div.find_all('div', class_='classnotes-link', recursive=False):
             link = classnotes_link.find('a')
             if link != -1:
                 url_item = urllib.parse.urljoin(url, link.get('href'))
-                self._download_item(download_manager, directory, url_item, url)
+                self._download_item(download_manager, directory, url_item, referrer=url)
+
+    def _process_alumni_lectures(self, download_manager, url, path, table):
+        tbody = table.tbody or table
+        for tr in tbody.find_all('tr', recursive=False):
+            cells = tr.find_all('td', recursive=False)
+            if len(cells) != 1:
+                continue
+            name = cells[0].string.strip()
+            url_item = urllib.parse.urljoin(url, cells[0].a.get('href'))
+            self._process_alumni_lectures_extra_media(download_manager, url_item, path + [name])
+
+    def _process_alumni_lectures_extra_media(self, download_manager, url, path):
+        request = self._get_with_retry(3, url)
+        soup = BeautifulSoup(request.text, 'html.parser')
+        for td1, td2 in zip(*[iter(soup.find_all('td'))]*2):
+            name = td1.string.strip()
+            new_url = urllib.parse.urljoin(url, td2.a.get('href'))
+            self._process_7city_page(download_manager, new_url, path + [name])
+
+    def _process_extra_media(self, download_manager, url, path, table):
+        tbody = table.tbody or table
+        for tr in tbody.find_all('tr', recursive=False):
+            cells = tr.find_all('td', recursive=False)
+            if len(cells) != 2:
+                continue
+            name = cells[0].string.strip()
+            url_item = urllib.parse.urljoin(url, cells[1].a.get('href'))
+            self._process_7city_page(download_manager, url_item, path + [name])
+
+    def _process_7city_page(self, download_manager, url, path):
+        print(f"Processing {'/'.join(path)}.")
+        result = self._get_with_retry(3, url)
+        soup = BeautifulSoup(result.text, 'html.parser')
+        try:
+            body = soup.html.body.html.body
+        except AttributeError:
+            body = None
+        if body:
+            file_types = []
+            for div in body.find_all('div', class_=['filetypes', 'filetypeselected'], recursive=False):
+                file_type = div.get('id').replace('_btn', '')
+                if file_type not in self._IGNORED_7CITY_TYPES:
+                    file_types.append(file_type)
+            for file_type in file_types:
+                new_path = path + [file_type]
+                directory = os.path.join(self.base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in new_path])
+                div = body.find('div', id=file_type, recursive=False)
+                for cell in div.find_all('td'):
+                    link = cell.a
+                    description = cell.a.string
+                    if 'low bandwidth' in description.lower():
+                        continue
+                    url_item = urllib.parse.urljoin(url, link.get('href'))
+                    request = self._get_with_retry(3, url_item)
+                    soup = BeautifulSoup(request.text, 'html.parser')
+                    
+                    # Check for meta refresh
+                    meta = soup.find('meta', attrs={'http-equiv': 'refresh'})
+                    if meta:
+                        text = meta.get('content').split(';')[1]
+                        if text.strip().lower().startswith('url='):
+                            new_url = text[4:].strip()
+                        else:
+                            raise Exception("Found <meta> tag but no URL.")
+                    else:
+                        script = soup.html.body.script.text
+                        new_url = urllib.parse.urljoin(url_item, script.replace("document.location.href='", '').replace("';", '').strip())
+                    self._process_7city_url(download_manager, directory, url, new_url)
+            return
+        try:
+            script = soup.html.body.script.text
+            new_url = urllib.parse.urljoin(url, script.replace("document.location.href='", '').replace("';", '').strip())
+            if new_url.startswith('https://erp.fitchlearning.com/erp_live/delegates/delegates_recording.php?emrid='):
+                result = self._get_with_retry(3, new_url)
+                soup = BeautifulSoup(result.text, 'html.parser')
+                script = soup.html.body.script.text
+                new_url = urllib.parse.urljoin(new_url, script.replace("document.location.href='", '').replace("';", '').strip())
+        except AttributeError:
+            new_url = None
+        if new_url:
+            directory = os.path.join(self.base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in path])
+            self._process_7city_url(download_manager, directory, url, new_url)
+            return
+        raise Exception("Unknown page type. Could not find any URL or media to process.")
+
+    def _process_7city_url(self, download_manager, directory, url, new_url):
+        if self._regex_7city_html_video.match(new_url):
+            self._process_7city_html_video(download_manager, directory, new_url)
+        elif self._regex_ssrn.match(new_url):
+            self._process_ssrn(download_manager, directory, new_url)
+        elif self._regex_html.match(new_url):
+            print(f"Skipping unknown URL type: {new_url}.")
+        elif self._regex_webex.match(new_url):
+            pass
+        elif self._regex_whitelist.match(new_url):
+            self._download_item(download_manager, directory, new_url, referrer=url)
+        elif self._regex_mms.match(new_url):
+            if self.verbose:
+                print(f"Skipping streaming mms video. {new_url}")
+            pass
+        elif new_url in self._EXCLUDE_LIST:
+            pass
+        else:
+            print(f"Downloading: {new_url}.")
+            self._download_item(download_manager, directory, new_url, referrer=url)
+
+    def _process_7city_html_video(self, download_manager, directory, url):
+        result = self._get_with_retry(3, url)
+        soup = BeautifulSoup(result.text, 'html.parser')
+        video = soup.find('video')
+        if video:
+            new_url = urllib.parse.urljoin(url, video.source.get('src'))
+            self._download_item(download_manager, directory, new_url, referrer=url)
+            return
+        div = soup.html.body.find('div', id='page', recursive=False)
+        if div:
+            a = div.find('a', id='player', recursive=False)
+            if a:
+                new_url = urllib.parse.urljoin(url, a.get('href'))
+                self._download_item(download_manager, directory, new_url, referrer=url)
+            return
+        swf = soup.find('object', type='application/x-shockwave-flash')
+        if swf:
+            new_url = urllib.parse.urljoin(url, swf.get('data'))
+            self._download_item(download_manager, directory, new_url, referrer=url)
+            return
+
+    def _process_ssrn(self, download_manager, directory, url):
+        ssrn_id = self._regex_ssrn.search(url).group(1)
+        path = os.path.join(directory, f'SSRN-id{ssrn_id}.pdf')
+        if not os.path.isfile(path):
+            print(f"Skipping SSRN paper. Please download manually: {url}.")
 
     def _download_item(self, download_manager, directory, url, referrer=None):
         filename = url.split('?')[0].rsplit('/', 1)[1]
         if self.verbose:
             print(f"Adding {filename} to download queue.")
         download_manager.enqueue(directory, filename, url, referrer)
+
+    def _get_with_retry(self, max_attempts, url):
+        retry_count = 0
+        while True:
+            try:
+                time.sleep(0.5 * retry_count)
+                return self._session.get(url)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                retry_count += 1
+                if retry_count >= max_attempts:
+                    raise
 
 
     class _DownloadManager:
@@ -226,18 +397,30 @@ class CqfDownloader:
                     print(f"Dequeued {queue_item.filename} for processing.")
                 try:
                     self._do_download_item(queue_item.directory, queue_item.filename, queue_item.url, queue_item.referrer)
-                except (requests.ConnectTimeout, requests.Timeout) as exc:
+                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
                     queue_item.increment_failure_count()
                     print(f"Attempt {queue_item.failure_count} of {self.max_retry_count} to download {queue_item.filename}. Exception: {exc}.")
                     if queue_item.failure_count < self.max_retry_count:
+                        time.sleep(0.5 * queue_item.failure_count)
+                        if self.verbose:
+                            print(f"Adding {queue_item.filename} back to queue.")
                         self._download_queue.put(queue_item)
+                    else:
+                        print(f"Giving up on {queue_item.filename}.")
+                except:
+                    # Do not let any exceptions get past here and terminate the thread
+                    print(f"Exception downloading {queue_item.url}.\r\n{traceback.format_exc()}")
                 self._download_queue.task_done()
 
         def _do_download_item(self, directory, filename, url, referrer):
+            filename = self._sanitize_filename(filename)
             path = os.path.join(directory, filename)
             result = self._session.head(url, headers={'referer': referrer})
-            last_mod = datetime(*eut.parsedate(result.headers['Last-Modified'])[:6])
-            unix_time = (last_mod - datetime.utcfromtimestamp(0)).total_seconds()
+            if 'Last-Modified' in result.headers:
+                last_mod = datetime(*eut.parsedate(result.headers['Last-Modified'])[:6])
+                unix_time = (last_mod - datetime.utcfromtimestamp(0)).total_seconds()
+            else:
+                unix_time = 0
             if self.overwrite or not os.path.isfile(path) or os.path.getmtime(path) < unix_time:
                 if self.verbose:
                     print(f"Downloading {filename}.")
@@ -251,11 +434,13 @@ class CqfDownloader:
                             break
                         if chunk:
                             f.write(chunk)
+                nt_prefix = '\\\\?\\' if os.name == 'nt' else ''
                 if stopped_early:
-                    self._remove_if_exists(f.name)
+                    self._remove_if_exists(nt_prefix + f.name)
                     return
-                os.replace(f.name, path)
-                self._change_file_time(path, unix_time)
+                os.replace(nt_prefix + f.name, nt_prefix + path)
+                if unix_time:
+                    self._change_file_time(nt_prefix + path, unix_time)
             else:
                 if self.verbose:
                     print(f"Skipping {filename} because it already exists.")
@@ -263,6 +448,13 @@ class CqfDownloader:
         @staticmethod
         def _change_file_time(filename, unix_time):
             os.utime(filename, (unix_time, unix_time))
+
+        @staticmethod
+        def _sanitize_filename(name):
+            # Windows only, and not perfect
+            name = re.sub(r'[\\\/:?"<>|]', '', name)
+            name = re.sub(r'\.*$', '', name)
+            return name
 
         @staticmethod
         def _make_dir(directory):
