@@ -221,7 +221,7 @@ class CqfDownloader:
                 for cell in div.find_all('td'):
                     link = cell.a
                     description = cell.a.string
-                    if 'low bandwidth' in description.lower():
+                    if 'low bandwidth' in description.lower() or 'low bandwith' in description.lower():
                         continue
                     url_item = urllib.parse.urljoin(url, link.get('href'))
                     request = self._get_with_retry(3, url_item)
