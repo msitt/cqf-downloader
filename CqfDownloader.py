@@ -434,6 +434,7 @@ class CqfDownloader:
                 if self.verbose:
                     print(f"Downloading {filename}.")
                 result = self._session.get(url, headers={'referer': referrer}, stream=True)
+                result.raise_for_status()
                 stopped_early = False
                 self._make_dir(directory)
                 with tempfile.NamedTemporaryFile(dir=directory, delete=False) as f:
