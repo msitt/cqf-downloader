@@ -23,8 +23,8 @@ class CqfDownloader:
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         }
         self._session.headers.update(custom_header)
+        self._base_output_dir = ''
         self.verbose = False
-        self.base_output_dir = ''
 
         self.login_url = 'https://erp.fitchlearning.com/erp_live/2/index.php/PortalEx/6/0/login/'
         self.study_url = 'https://erp.fitchlearning.com/erp_live/2/index.php/PortalEx/6/0/page/25776/show/'
@@ -46,6 +46,15 @@ class CqfDownloader:
 
     def __exit__(self, exception_type, exception_value, traceback):
         self._session.__exit__(exception_type, exception_value, traceback)
+
+    def set_base_output_dir(self, directory):
+        if os.name == 'nt':
+            if directory.startswith('\\\\'):
+                self._base_output_dir = '\\\\?\\UNC\\' + directory[2:]
+            else:
+                self._base_output_dir = '\\\\?\\' + directory
+        else:
+            self._base_output_dir = directory
 
     def login(self, username, password):
         """Login to the portal."""
@@ -127,7 +136,7 @@ class CqfDownloader:
 
     def _download_videos(self, download_manager, url, path, div):
         path = path + ['Video']
-        directory = os.path.join(self.base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in path])
+        directory = os.path.join(self._base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in path])
         div = div.find('div', id='mediarecordingarea', recursive=False)
         for recording_entry in div.find_all('div', class_='recording-entry', recursive=False):
             # Skip LB (Low Bandwidth) versions
@@ -155,7 +164,7 @@ class CqfDownloader:
 
     def _download_classnotes(self, download_manager, url, path, div):
         path = path + ['Classnotes']
-        directory = os.path.join(self.base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in path])
+        directory = os.path.join(self._base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in path])
         div = div.find('div', id='classnotes-area', recursive=False)
         for classnotes_link in div.find_all('div', class_='classnotes-link', recursive=False):
             link = classnotes_link.find('a')
@@ -207,7 +216,7 @@ class CqfDownloader:
                     file_types.append(file_type)
             for file_type in file_types:
                 new_path = path + [file_type]
-                directory = os.path.join(self.base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in new_path])
+                directory = os.path.join(self._base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in new_path])
                 div = body.find('div', id=file_type, recursive=False)
                 for cell in div.find_all('td'):
                     link = cell.a
@@ -242,7 +251,7 @@ class CqfDownloader:
         except AttributeError:
             new_url = None
         if new_url:
-            directory = os.path.join(self.base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in path])
+            directory = os.path.join(self._base_output_dir, *[self._DownloadManager._sanitize_filename(n) for n in path])
             self._process_7city_url(download_manager, directory, url, new_url)
             return
         raise Exception("Unknown page type. Could not find any URL or media to process.")
@@ -424,9 +433,9 @@ class CqfDownloader:
             if self.overwrite or not os.path.isfile(path) or os.path.getmtime(path) < unix_time:
                 if self.verbose:
                     print(f"Downloading {filename}.")
-                self._make_dir(directory)
                 result = self._session.get(url, headers={'referer': referrer}, stream=True)
                 stopped_early = False
+                self._make_dir(directory)
                 with tempfile.NamedTemporaryFile(dir=directory, delete=False) as f:
                     for chunk in result.iter_content(chunk_size=self.streaming_chunk_size):
                         if self._stop_token.is_set():
@@ -434,13 +443,12 @@ class CqfDownloader:
                             break
                         if chunk:
                             f.write(chunk)
-                nt_prefix = '\\\\?\\' if os.name == 'nt' else ''
                 if stopped_early:
-                    self._remove_if_exists(nt_prefix + f.name)
+                    self._remove_if_exists(f.name)
                     return
-                os.replace(nt_prefix + f.name, nt_prefix + path)
+                os.replace(f.name, path)
                 if unix_time:
-                    self._change_file_time(nt_prefix + path, unix_time)
+                    self._change_file_time(path, unix_time)
             else:
                 if self.verbose:
                     print(f"Skipping {filename} because it already exists.")
@@ -491,7 +499,7 @@ def main():
     password = config.SETTINGS['password']
     outdir = config.SETTINGS['outdir']
     with CqfDownloader() as cqf:
-        cqf.base_output_dir = outdir
+        cqf.set_base_output_dir(outdir)
         cqf.login(username, password)
         cqf.download_study_materials(num_workers=8)
 
